@@ -5,6 +5,17 @@
  *  (array of trials). The master assembly is in experiment.js.
  *
  *  All section references below are to Protocol v5.
+ *
+ *  --- PATCH NOTES (this revision) ----------------------------------------
+ *   #1  bisection on_finish: timeouts (response === null) are now coded as
+ *       response_num = null instead of 0, so missed trials are no longer
+ *       silently counted as "start" responses. NOTE: the analysis pipeline
+ *       must drop null response_num rows before aggregating "end" counts.
+ *   #3  distractor Raven timer: the no-op `/ 5 * 5` arithmetic was removed;
+ *       duration is now simply ravenSecsPerItem * 5 items * 1000 ms.
+ *   #6  recall test: the seven numeric inputs are validated client-side to
+ *       a strict permutation of 1–7 (each used exactly once) before the
+ *       Continue button / Enter key will submit. Data shape is unchanged.
  * ========================================================================= */
 
 ROCONN.phases = {};
@@ -197,6 +208,77 @@ ROCONN.phases.buildRecallTest = function (cond, phaseLabel) {
             : 'Same task: type the position (1–7) for each event'}</h3>`,
         questions: questions,
         data: { phase: phaseLabel, display_order: displayOrder.join(',') },
+
+        /* ---- FIX #6: enforce a strict 1–7 permutation before submit ----
+           Validation is purely client-side and does not alter the saved
+           data shape: each field still stores the typed position string
+           under pos_<eid>, so scoring in on_finish is unchanged. The
+           Continue button stays disabled (and Enter-to-submit is blocked)
+           until all seven inputs form exactly {1,…,7} with no repeats. */
+        on_load: function () {
+            const form = document.getElementById('jspsych-survey-text-form');
+            if (!form) return;
+
+            const inputs = Array.prototype.slice.call(
+                form.querySelectorAll('input[type=text]'));
+            const submit = document.getElementById('jspsych-survey-text-next')
+                         || form.querySelector('button');
+
+            const isValidPermutation = function () {
+                const seen = {};
+                let count = 0;
+                for (let k = 0; k < inputs.length; k++) {
+                    const v = inputs[k].value.trim();
+                    if (!/^[1-7]$/.test(v)) return false;   // single digit 1–7 only
+                    if (seen[v]) return false;              // no repeats
+                    seen[v] = true;
+                    count++;
+                }
+                return count === inputs.length;             // every field filled
+            };
+
+            // Inline validation message, inserted just above the submit button.
+            let warn = document.getElementById('recall-validation-msg');
+            if (!warn) {
+                warn = document.createElement('p');
+                warn.id = 'recall-validation-msg';
+                warn.style.cssText =
+                    'font-family:Inter,sans-serif;font-size:0.85em;'
+                  + 'color:#b03434;text-align:center;min-height:1.2em;margin:0.4em 0;';
+                if (submit && submit.parentNode) {
+                    submit.parentNode.insertBefore(warn, submit);
+                } else {
+                    form.appendChild(warn);
+                }
+            }
+
+            const refresh = function () {
+                const ok = isValidPermutation();
+                if (submit) submit.disabled = !ok;
+                warn.textContent = ok
+                    ? ''
+                    : 'Enter each number 1–7 exactly once before continuing.';
+            };
+
+            inputs.forEach(function (el) {
+                el.setAttribute('inputmode', 'numeric');
+                el.setAttribute('maxlength', '1');
+                el.addEventListener('input', refresh);
+            });
+
+            // Block Enter-to-submit on an invalid form. Capture phase runs
+            // before the plugin's own (bubble-phase) submit handler.
+            form.addEventListener('submit', function (e) {
+                if (!isValidPermutation()) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    refresh();
+                }
+            }, true);
+
+            refresh();   // start disabled until a valid permutation is entered
+        },
+
         on_finish: function (data) {
             // Score each response against true ordering.
             let nCorrect = 0;
@@ -254,7 +336,8 @@ ROCONN.phases.buildDistractor = function () {
     };
 
     const ravenTimer = makeTimedScreen({
-        durationMs: ROCONN.params.ravenSecsPerItem * 5 * 1000 / 5 * 5,   // 8 min total
+        // FIX #3: 5 items × ravenSecsPerItem (96 s) × 1000 ms = 480000 ms (8 min).
+        durationMs: ROCONN.params.ravenSecsPerItem * 5 * 1000,
         title: 'Task 1 — Pattern matrices',
         body:  `<p>Your experimenter will provide a sheet of <strong>5 pattern
                    matrices</strong>. Please attempt them now.</p>
@@ -461,7 +544,11 @@ ROCONN.phases.buildBisectionBlock = function (cond, pressure, blockIndex, blockO
             data.response_side = (data.response === ROCONN.params.keyLeft)
                 ? 'start'
                 : (data.response === ROCONN.params.keyRight ? 'end' : null);
-            data.response_num = (data.response === ROCONN.params.keyRight) ? 1 : 0; // J=end=1
+            // FIX #1: timeouts (response === null) must NOT be coded as 0 ("start").
+            //   J = end = 1, F = start = 0, no response = null (drop in analysis).
+            data.response_num = (data.response === ROCONN.params.keyRight) ? 1
+                              : (data.response === ROCONN.params.keyLeft)  ? 0
+                              : null;
         },
     };
 
