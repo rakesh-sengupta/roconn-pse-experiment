@@ -101,7 +101,7 @@ files as-is) and a deploy workflow at `.github/workflows/deploy-pages.yml`.
 3. **Wait for the deploy.** The **Actions** tab shows the "Deploy to GitHub
    Pages" run. When it finishes, your experiment is live at:
    ```
-   https://<you>.github.io/roconn-pse-experiment/
+   https://rakesh-sengupta.github.io/roconn-pse-experiment/
    ```
 
 Every later `git push` to the default branch redeploys automatically. You can
