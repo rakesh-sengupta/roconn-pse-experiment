@@ -50,18 +50,122 @@ python -m http.server 8000          # Python 3
 Then open in a modern browser (Chrome / Edge / Firefox):
 
 ```
+http://localhost:8000/
+```
+
+**Condition assignment is random on every run.** Opening the bare URL draws a
+cell (C1–C4) and a block-order subgroup (SG1–SG6) uniformly at random and
+auto-generates a participant ID. No query string is needed.
+
+To **override** the random draw — e.g. to follow a pre-generated *balanced*
+randomisation list (recommended for live data collection; see
+`Counterbalancing` below) — pass any of the parameters explicitly; any omitted
+parameter is still randomised:
+
+```
 http://localhost:8000/?cell=C1&sg=SG1&pid=P0001
 ```
 
-The URL parameters assign the participant's condition. If you omit them,
-the experiment will randomly assign a cell and subgroup and auto-generate a
-participant ID — useful for piloting, but **for live data collection you
-should assign conditions explicitly** from a pre-generated randomisation
-list (see `Counterbalancing` below).
+At the end of the session the experiment downloads **two CSV files** (see
+`Data output`): the full trial-level data and a one-row **condition manifest**.
 
 > The experiment **must** be served over HTTP. Opening `index.html` directly
 > with the `file://` protocol will break the jsPsych CDN imports and the
-> data-save download.
+> CSV downloads.
+
+### Deploying on GitHub Pages
+
+The experiment is entirely client-side (static files + the jsPsych CDN), so it
+runs on GitHub Pages with no build step and no server code. The repository
+ships with everything Pages needs: a `.nojekyll` file (so Pages serves the
+files as-is) and a deploy workflow at `.github/workflows/deploy-pages.yml`.
+
+**One-time setup:**
+
+1. **Create the repo and push.** From inside the project folder:
+   ```bash
+   git init
+   git add .
+   git commit -m "Initial commit: ROCONN PSE experiment"
+   git branch -M main
+   git remote add origin https://github.com/<you>/roconn-pse-experiment.git
+   git push -u origin main
+   ```
+   (If your default branch is `master`, edit the `branches:` line in
+   `.github/workflows/deploy-pages.yml` to match.)
+
+2. **Turn on Pages with GitHub Actions as the source.** In the repo:
+   **Settings → Pages → Build and deployment → Source → "GitHub Actions."**
+   That is the only setting to change; the included workflow does the rest.
+
+3. **Wait for the deploy.** The **Actions** tab shows the "Deploy to GitHub
+   Pages" run. When it finishes, your experiment is live at:
+   ```
+   https://<you>.github.io/roconn-pse-experiment/
+   ```
+
+Every later `git push` to the default branch redeploys automatically. You can
+also trigger a deploy manually from the **Actions** tab (the workflow has a
+`workflow_dispatch` button).
+
+**Using the live experiment.** Open the Pages URL with no query string: each
+visit is assigned a random cell/subgroup and downloads the two CSV files at the
+end (see `Data output`). Append `?demo=1` to the Pages URL to walk the whole
+thing as a demo. URL overrides for a balanced list work too, e.g.
+`https://<you>.github.io/roconn-pse-experiment/?cell=C1&sg=SG1&pid=P0001`.
+
+> **Read before collecting data online.** GitHub Pages is *read-only* static
+> hosting — there is no backend to receive data. By default the experiment
+> saves by triggering a CSV **download in the participant's browser**, which is
+> reliable for **supervised, in-lab** sessions (you control the machine and can
+> collect the file). For **unsupervised online** runs, a closed tab or a
+> blocked download means a lost session, so route the data to a collector — see
+> *Server-side data saving* below. The Pages site itself never stores data.
+
+### Testing the full experiment (demo mode)
+
+A real session ends quickly if the participant declines consent, is excluded
+at the pre-quiz, or fails the **immediate-recall ≥6/7 gate** — the last of
+which happens whenever you click through to test without memorising the seven
+events. The session then terminates *before* the 20-minute distractor and
+*before* any of the 195 bisection trials, so a quick test looks deceptively
+short (often only a handful of screens). This is the protocol's intended
+behaviour (§2.5–2.6, §3.4).
+
+**Two ways to see the entire experiment run end-to-end in ~2–3 minutes:**
+
+1. **Just open `index.html` as a local file (double-click it).** When the page
+   is loaded over `file://`, demo mode turns on automatically — because you
+   cannot serve or collect real data that way, so a local-file open is, by
+   definition, a test. A red banner marks the session.
+2. **Over HTTP, append `?demo=1`:** `http://localhost:8000/?demo=1`.
+
+Demo mode bypasses the pre-quiz and recall gates, shortens the distractor /
+rest / inter-block timers, and reduces the bisection blocks to 10 trials each,
+so you walk every phase — including all three confederate-pressure blocks and
+the deception debrief.
+
+To force demo **off** even on a local file (e.g. to test the real gated flow),
+open `index.html?demo=0`. A genuine full data-collection run must be **served
+over HTTP** (so the two CSV files download reliably), assigns conditions
+randomly, requires passing recall at ≥6/7, and takes the full ~75 minutes with
+65 trials per block.
+
+---
+
+## Cover story
+
+The participant-facing study name is deliberately neutral — **"Document Review
+Study"** — so it does not reveal that the experiment concerns memory or social
+conformity. All welcome/consent/instruction text is framed around "reviewing a
+report" and "other reviewers," and the recall screens are labelled
+"comprehension check," not "memory test." The true purpose is revealed only in
+the full-disclosure debrief at the end. To rename the study, edit a single
+line in `js/config.js`:
+
+```js
+ROCONN.studyName = 'Document Review Study';
+```
 
 ---
 
@@ -71,13 +175,23 @@ list (see `Counterbalancing` below).
 roconn-pse-experiment/
 ├── index.html              # Entry point; loads jsPsych and project sources.
 ├── README.md               # This file.
+├── LICENSE                 # MIT.
+├── .gitignore              # Ignores collected data/ CSVs.
 ├── css/
 │   └── style.css           # Academic-serif styling for trials and panels.
-└── js/
-    ├── config.js           # Cells, subgroups, sequences, narrative, params.
-    ├── panels.js           # Dynamically generated confederate panel SVG.
-    ├── phases.js           # Trial timeline builders for each session phase.
-    └── experiment.js       # Master timeline assembly and jsPsych init.
+├── js/
+│   ├── config.js           # Cells, subgroups, sequences, narrative, params,
+│   │                       #   and RANDOM condition assignment.
+│   ├── panels.js           # Confederate-panel HTML + SVG edge overlay
+│   │                       #   (the clustering/deception manipulation).
+│   ├── tasks.js            # In-browser distractor tasks: matrix puzzles
+│   │                       #   + interactive word search (no paper, no
+│   │                       #   experimenter hand-outs).
+│   ├── phases.js           # Trial timeline builders for each session phase.
+│   └── experiment.js       # Master timeline assembly, jsPsych init, CSV export.
+├── analysis/
+│   └── roconn_pipeline.R   # quickpsy + LMM pipeline (Appendix C, adapted).
+└── data/                   # (git-ignored) drop collected session CSVs here.
 ```
 
 Each phase of the session is a small, self-contained timeline builder in
@@ -96,7 +210,7 @@ The full session is ~75 minutes:
 | 1 | Consent, instructions, pre-quiz      | `buildIntro`                     | ~7 min    |
 | 2 | Encoding (two read-throughs of narrative) | `buildEncoding`             | ~12 min   |
 | 3 | Immediate recall (≥6/7 gate)         | `buildRecallTest('immediate_recall')` | ~5 min |
-| 4 | 20-minute distractor (Raven's + word search + rest) | `buildDistractor` | 20 min |
+| 4 | Distractor: matrix puzzles + word search + rest (all in-browser) | `buildDistractor` / `tasks.js` | ~16–20 min |
 | 5 | Post-distractor recall (covariate)   | `buildRecallTest('post_distractor_recall')` | ~2 min |
 | 6 | Confederate panel training           | `buildTraining`                  | ~3 min    |
 | 7 | Three bisection blocks (65 trials each, with inter-block rests) | `buildBisectionBlock` ×3 | ~25 min |
@@ -106,6 +220,14 @@ The full session is ~75 minutes:
 ---
 
 ## Counterbalancing
+
+By default the experiment assigns each session a cell and subgroup **uniformly
+at random** in the browser. Per-session random draws are independent and
+stateless, so they do **not** guarantee equal cell counts across a finite
+sample. For live data collection where balance matters, generate a balanced
+randomisation list (below) and pass `cell`/`sg`/`pid` via the URL to override
+the random draw; the `assignment` column in the data records which path was
+used.
 
 ### Between-subjects cells (4)
 
@@ -158,11 +280,30 @@ opens the experiment with the matching URL.
 
 ## Data output
 
-At session end, jsPsych downloads a CSV with one row per trial named:
+At session end the experiment downloads **two CSV files**:
 
 ```
-roconn_<pid>_<cell>_<subgroup>.csv
+roconn_<pid>_<cell>_<subgroup>.csv            # 1. full trial-level data
+roconn_condition_<pid>_<cell>_<subgroup>.csv  # 2. one-row condition manifest
 ```
+
+Both download automatically. If a browser blocks the programmatic download,
+the completion screen also shows **“Download condition file”** and **“Download
+data file”** buttons that download on click. Because conditions are assigned
+randomly in the browser (with no server to log them), the condition manifest
+is the per-session record of *what* was assigned — keep it alongside the data
+file.
+
+### File 2 — condition manifest
+
+One header row + one data row, with the columns: `pid`, `cell`, `subgroup`,
+`topology`, `direction`, `encoded_seq`, `pushed_seq`, `pressure_block1..3`,
+`assignment` (`random` or `url`), `session_start`, `completed_at`,
+`prequiz_yes_count`, `immediate_recall_correct`, `post_distractor_accuracy`,
+`withdrew`. The outcome columns are filled best-effort (blank if the session
+ended before reaching them, e.g. a pre-quiz exclusion).
+
+### File 1 — trial-level data
 
 Every row carries the following session-level metadata in addition to the
 trial-specific columns:
@@ -176,6 +317,7 @@ trial-specific columns:
 | `direction`       | string   | `seq1to2` / `seq2to1`                            |
 | `encoded_seq`     | int      | 1 / 2                                            |
 | `pushed_seq`      | int      | 1 / 2                                            |
+| `assignment`      | string   | `random` (default) / `url` (override)            |
 | `phase`           | string   | Per-phase tag (see below)                        |
 | `immediate_recall_correct` | int  | 0–7                                          |
 | `post_distractor_accuracy` | int  | 0–7                                          |
@@ -195,31 +337,40 @@ Bisection-trial rows (`phase = "bisection"`) additionally include:
 | `rt`          | Response time, ms                                      |
 
 Phase tags include: `consent`, `instructions`, `prequiz`, `encoding`,
-`encoding_pass2_intro`, `immediate_recall`, `distractor_raven`,
+`encoding_pass2_intro`, `immediate_recall`, `distractor_matrix`,
+`distractor_wordsearch`,
 `distractor_wordsearch`, `distractor_rest`, `post_distractor_recall`,
 `training_slide1`, `training_slide2`, `training_check`, `panel_load`,
 `block_intro`, `bisect_anchor_preview`, `bisection`, `iti`,
 `inter_block_rest`, `mc_connectedness`, `mc_endorsement`, `mc_confidence`,
 `fd_q1`, `fd_q2`, `fd_q3`, `fd_q4`, `full_disclosure`.
 
-### Server-side data saving (optional)
+### Server-side data saving (for online / Pages runs)
 
-`jsPsych.data.get().localSave('csv', ...)` triggers a browser download.
-For unattended online runs you will want to write data to a server instead.
-The simplest options are:
+The experiment always downloads the two CSV files locally. For online runs you
+will also want the data sent somewhere it cannot be lost. There is a built-in
+hook for this — **no code edit required**: append a `data=` parameter pointing
+at any endpoint that accepts a POST, and the experiment will POST both CSVs to
+it (as JSON) at the end, in addition to the local download.
 
-* **JATOS** — wrap the experiment as a JATOS study and use
-  `jatos.submitResultData(jsPsych.data.get().csv())` in place of
-  `localSave`.
-* **Pavlovia** — Pavlovia supports jsPsych natively; see
+```
+https://<you>.github.io/roconn-pse-experiment/?data=https://your-endpoint.example/submit
+```
+
+The POST body is JSON: `{ pid, cell, subgroup, data_filename, data_csv,
+condition_filename, condition_csv }`. The endpoint can be anything that accepts
+cross-origin POSTs — a Google Apps Script web app, a Cloudflare Worker, a
+Formspree-style form backend, or your own server. The local download still
+happens regardless, so the hook is purely additive.
+
+Alternatives that replace the save mechanism entirely:
+
+* **JATOS** — wrap the experiment as a JATOS study and call
+  `jatos.submitResultData(jsPsych.data.get().csv())` in `on_finish`.
+* **Pavlovia** — supports jsPsych natively; see
   https://pavlovia.org/docs/experiments/create-jspsych.
-* **Custom endpoint** — POST the CSV to your own collection URL:
 
-  ```js
-  fetch('/submit', { method: 'POST', body: jsPsych.data.get().csv() });
-  ```
-
-  Replace the `localSave` call in `js/experiment.js → on_finish`.
+For either, edit the `on_finish` handler in `js/experiment.js`.
 
 ---
 
@@ -320,9 +471,10 @@ Procedure for a 20–25-station lab cohort (per Protocol v5 §2.2):
    A research assistant remains for technical problems only and does not
    interact with participants. The 5–6-minute training plus loading-pause
    timing makes this transition unobtrusive.
-4. **Distractor.** During the 20-minute distractor window, the experimenter
-   distributes Raven's and word-search sheets at the appropriate moments.
-   The on-screen timer enforces the minimum duration.
+4. **Distractor.** The matrix puzzles and word search run entirely on screen;
+   the participant completes them with mouse/keyboard. No sheets are handed
+   out and no experimenter action is required. The word search auto-advances
+   at its time limit, which enforces the minimum distractor duration.
 5. **Bisection blocks.** Self-contained; the experimenter stays out of the
    room.
 6. **Debrief and disclosure.** Once all participants have reached the full
@@ -403,4 +555,4 @@ License: <https://www.jspsych.org>.
 **Email:** rakesh.sengupta@krea.edu.in
 **Institution:** School of Interwoven Arts and Sciences, Krea University, Sri City, Andhra Pradesh 517 646, India
 
-For bug reports and feature requests, please open an [issue](https://github.com/rakesh-sengupta/DyscalcBattery/issues).
+For bug reports and feature requests, please open an [issue](https://github.com/rakesh-sengupta/roconn-pse-experiment/issues).
