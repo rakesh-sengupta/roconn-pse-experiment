@@ -142,7 +142,6 @@ ROCONN.buildWordSearch = function () {
            </div>`,
         data: { phase: 'distractor_wordsearch', duration_ms: durationMs },
         on_load: function () {
-            ROCONN._wsFound = 0; ROCONN._wsTotal = 0;   // reset before building
             const N = size;
             const words = _shuffle(WORDSEARCH_WORDS)
                             .filter(w => w.length <= N)
@@ -247,35 +246,4 @@ ROCONN.buildWordSearch = function () {
             data.wordsearch_total = ROCONN._wsTotal || 0;
         },
     };
-};
-
-/* =========================================================================
- *  3.  FILLER TRACK  (encoding-failure route, protocol v5 2.5)
- *  A ~15-minute untimed set of the same pattern puzzles, so that a
- *  participant who fails the immediate-recall gate keeps a screen that
- *  looks like everyone else's in a shared cohort room. Responses are
- *  recorded but never analysed.
- * ========================================================================= */
-ROCONN.buildFillerTask = function () {
-    const totalMs = ROCONN.params.encodingFailFillerMs || 900000;
-    const perItem = 45000;
-    const nItems  = Math.max(1, Math.round(totalMs / perItem));
-
-    const items = [];
-    for (let i = 0; i < nItems; i++) {
-        const item = _makeMatrixItem();
-        items.push({
-            type: jsPsychHtmlButtonResponse,
-            stimulus: `<div class="mtx-wrap">
-                        <div class="mtx-counter">Puzzle ${i + 1} of ${nItems}</div>
-                        ${item.gridHTML}
-                        <div class="mtx-prompt">Which option completes the pattern?</div>
-                       </div>`,
-            choices: item.options,
-            button_html: '<button class="jspsych-btn mtx-opt">%choice%</button>',
-            trial_duration: perItem,
-            data: { phase: 'filler_matrix', item_index: i },
-        });
-    }
-    return items;
 };

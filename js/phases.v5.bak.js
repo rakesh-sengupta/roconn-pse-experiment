@@ -40,8 +40,8 @@ ROCONN.phases.buildIntro = function (cond) {
             <div class="text-screen">
                 <h2>Informed Consent</h2>
                 <p>Welcome to the ${ROCONN.studyName}.</p>
-                <p>You will read a short report about an environmental policy dispute
-                   and complete some short tasks. The session will take approximately
+                <p>You will read a short document about an international dispute and
+                   complete some short tasks. The session will take approximately
                    75 minutes. Your data will be stored anonymously under participant
                    ID <strong>${cond.pid}</strong>.</p>
                 <p>You may withdraw at any time without consequence. The study has
@@ -52,12 +52,8 @@ ROCONN.phases.buildIntro = function (cond) {
         choices: ['I consent — begin', 'I do not consent — exit'],
         data: { phase: 'consent' },
         on_finish: function (data) {
-            // Button 1 (second) is the exit option. No data file is written
-            // for a participant who did not consent (see ROCONN.terminate).
-            if (data.response === 1) {
-                ROCONN.terminate('no_consent',
-                    'Thank you. The session has been ended.', { suppressData: true });
-            }
+            // Button 1 (second) is the exit option.
+            if (data.response === 1) jsPsych.endExperiment('Thank you. The session has been ended.');
         },
     };
 
@@ -69,9 +65,9 @@ ROCONN.phases.buildIntro = function (cond) {
                 <p><em>Read aloud by the researcher:</em></p>
                 <blockquote>
                     "Welcome to the ${ROCONN.studyName}. In this session you will read
-                    a short news-style report about an environmental policy dispute
-                    and answer some questions about it. Other people are reviewing the
-                    same report today. Partway through, the system will show you how those
+                    a short news-style report about an international trade dispute and
+                    answer some questions about it. Other people are reviewing the same
+                    report today. Partway through, the system will show you how those
                     other reviewers responded, and you will then make a series of quick
                     judgements about the report.
                     <br><br>
@@ -85,64 +81,8 @@ ROCONN.phases.buildIntro = function (cond) {
         data: { phase: 'instructions' },
     };
 
-    /* ---- Eligibility screen (v5 §2.3, previously not implemented) ----
-       Age 18-45, fluent English, normal or corrected vision, no diagnosed
-       neurological or psychiatric condition. Any failure ends the session
-       with the no-blame message and full payment. */
-    const eligAge = {
-        type: jsPsychSurveyText,
-        preamble: '<h2>Before we begin</h2>',
-        questions: [{ prompt: ROCONN.eligibility.ageQuestion,
-                      name: 'age', required: true, columns: 4 }],
-        data: { phase: 'eligibility_age' },
-        on_finish: function (data) {
-            const a = parseInt(data.response.age, 10);
-            data.age = isNaN(a) ? null : a;
-            jsPsych.data.addProperties({ age: data.age });
-        },
-    };
-
-    const eligItems = {
-        timeline: ROCONN.eligibility.items.map(item => ({
-            type: jsPsychHtmlButtonResponse,
-            stimulus: `<div class="text-screen"><h3>${item.q}</h3></div>`,
-            choices: ['Yes', 'No'],
-            data: { phase: 'eligibility', item_name: item.name,
-                    eligible_answer: item.eligible },
-            on_finish: function (data) {
-                // NB: named item_eligible, not eligible. eligCheck writes a
-                // session-level `eligible` with addProperties, which would
-                // overwrite a per-trial field of the same name on every row.
-                data.item_eligible = (data.response === data.eligible_answer) ? 1 : 0;
-            },
-        })),
-    };
-
-    const eligCheck = {
-        type: jsPsychCallFunction,
-        async: false,
-        func: function () {
-            const age = jsPsych.data.get().select('age').values.filter(v => v != null).pop();
-            const failedItems = jsPsych.data.get()
-                                  .filter({ phase: 'eligibility' })
-                                  .select('item_eligible').values
-                                  .filter(v => v === 0).length;
-            const ageOk = (age != null &&
-                           age >= ROCONN.params.ageMin && age <= ROCONN.params.ageMax);
-            const ok = ageOk && failedItems === 0;
-            jsPsych.data.addProperties({ eligible: ok ? 1 : 0 });
-            if (!ROCONN.demo && !ok) {
-                ROCONN.terminate('not_eligible',
-                    `Thank you. This study is not the right fit for you today.
-                     You will still receive full payment. Please call the
-                     experimenter.`, { manifestOnly: true });
-            }
-        },
-    };
-
-    /* ---- Pre-quiz: 10 items. Two are reverse-keyed, so the score is the
-       number of EXPOSED answers, not the number of "yes" answers.
-       Score >3 -> exclude (too well-informed about the topic). §2.3 ---- */
+    /* Pre-quiz: 10 yes/no items; score = # yes (= # "exposed" answers).
+       Score >3 -> exclude (too well-informed about the topic).  §2.3 */
     const prequiz = {
         timeline: ROCONN.prequiz.map((item, i) => ({
             type: jsPsychHtmlButtonResponse,
@@ -151,9 +91,9 @@ ROCONN.phases.buildIntro = function (cond) {
                         <h3>${item.q}</h3>
                        </div>`,
             choices: ['Yes', 'No'],
-            data: { phase: 'prequiz', q_index: i, exposed_answer: item.exposed },
+            data: { phase: 'prequiz', q_index: i, correct_a: item.a },
             on_finish: function (data) {
-                data.exposed_response = (data.response === data.exposed_answer) ? 1 : 0;
+                data.yes_response = (data.response === 0) ? 1 : 0;
             },
         })),
     };
@@ -162,21 +102,20 @@ ROCONN.phases.buildIntro = function (cond) {
         type: jsPsychCallFunction,
         async: false,
         func: function () {
-            const exposed = jsPsych.data.get()
+            const yes = jsPsych.data.get()
                                  .filter({ phase: 'prequiz' })
-                                 .select('exposed_response').sum();
-            jsPsych.data.addProperties({ prequiz_exposed_count: exposed });
-            if (!ROCONN.demo && exposed > ROCONN.params.prequizMaxScore) {
-                ROCONN.terminate('prequiz_exclusion',
+                                 .select('yes_response').sum();
+            jsPsych.data.addProperties({ prequiz_yes_count: yes });
+            if (!ROCONN.demo && yes > ROCONN.params.prequizMaxScore) {
+                jsPsych.endExperiment(
                     `Thank you — based on your responses, this study is not the
                      right fit for you today. You will still receive full payment.
-                     Please call the experimenter.`, { manifestOnly: true });
+                     Please call the experimenter.`);
             }
         },
     };
 
-    return [enterFullscreen, consent, instructions,
-            eligAge, eligItems, eligCheck, prequiz, prequizCheck];
+    return [enterFullscreen, consent, instructions, prequiz, prequizCheck];
 };
 
 /* =========================================================================
@@ -358,58 +297,29 @@ ROCONN.phases.buildRecallTest = function (cond, phaseLabel) {
         },
     };
 
-    /* The immediate-recall gate. v5 §2.5 requires failures to complete a
-       15-minute filler so that they are indistinguishable to neighbours in
-       a 20-station cohort room. The filler is built from the same matrix
-       generator as the distractor and runs as a conditional sub-timeline;
-       the main study then ends. */
+    // The immediate-recall gate: route failures to debrief.
     const gate = {
         type: jsPsychCallFunction,
         async: false,
         func: function () {
             const n = jsPsych.data.get().last(1).values()[0].recall_correct;
-            const failed = isGateImmediate && !ROCONN.demo
-                           && n < ROCONN.params.immediateRecallGate;
-            ROCONN.encodingFailed = ROCONN.encodingFailed || failed;
-            if (failed) jsPsych.data.addProperties({ encoding_failure: 1 });
+            if (!ROCONN.demo && isGateImmediate && n < ROCONN.params.immediateRecallGate) {
+                jsPsych.endExperiment(
+                    `Thank you for your participation today. Your result on this
+                     task means we are unable to continue with the main study today.
+                     You will now complete a short additional activity before we
+                     finish. Please call the experimenter.`);
+            }
         },
     };
 
-    if (!isGateImmediate) return [intro, recall, gate];
-
-    /* Filler track: shown only when the gate has fired. */
-    const fillerNotice = {
-        type: jsPsychHtmlButtonResponse,
-        stimulus: `<div class="text-screen">
-                    <h2>Next activity</h2>
-                    <p>You will now complete a short additional activity before
-                       we finish. It takes about fifteen minutes.</p>
-                   </div>`,
-        choices: ['Begin'],
-        data: { phase: 'filler_notice' },
-    };
-
-    const fillerTrack = {
-        timeline: [fillerNotice, ...ROCONN.buildFillerTask(), {
-            type: jsPsychCallFunction,
-            async: false,
-            func: function () {
-                ROCONN.terminate('encoding_failure',
-                    `Thank you for taking part today. That is the end of the
-                     session. Please call the experimenter.`);
-            },
-        }],
-        conditional_function: function () { return ROCONN.encodingFailed === true; },
-    };
-
-    return [intro, recall, gate, fillerTrack];
+    return [intro, recall, gate];
 };
 
 /* =========================================================================
- *  DISTRACTOR — fixed 20-minute window, fully in-browser             §6
+ *  DISTRACTOR — ~16-20 minutes, fully in-browser                     §6
  *  Interactive matrix puzzles (tasks.js) + interactive word search
- *  (tasks.js) + an elastic rest that absorbs the remainder, so the total
- *  is identical for every participant. No paper tasks.
+ *  (tasks.js) + a timed rest. No experimenter-administered paper tasks.
  * ========================================================================= */
 ROCONN.phases.buildDistractor = function () {
 
@@ -428,68 +338,18 @@ ROCONN.phases.buildDistractor = function () {
     const matrixTask = ROCONN.buildMatrixTask();   // [intro, ...items]
     const wordSearch = ROCONN.buildWordSearch();    // single timed interactive trial
 
-    /* The rest screen absorbs whatever time the puzzles did not use, so the
-       distractor window is the same fixed length for every participant.
-       Previously the total varied by roughly seven minutes across people
-       purely as a function of how quickly they clicked through the matrices. */
-    const restTimer = makeElasticRestScreen({
-        totalMs: ROCONN.params.distractorTotalMs,
-        minMs:   ROCONN.params.restMinMs,
+    const restTimer = makeTimedScreen({
+        durationMs: ROCONN.params.restMs,
         title: 'Rest',
         body:  `<p>Please rest quietly for a short while. The next part of the
                    session will begin automatically.</p>
                 <p>Please keep your eyes on the screen.</p>`,
         dataPhase: 'distractor_rest',
+        showCountdown: true,
     });
 
-    const markStart = {
-        type: jsPsychCallFunction,
-        async: false,
-        func: function () { ROCONN._distractorStart = performance.now(); },
-        data: { phase: 'distractor_clock_start' },
-    };
-
-    return [introDistractor, markStart, ...matrixTask, wordSearch, restTimer];
+    return [introDistractor, ...matrixTask, wordSearch, restTimer];
 };
-
-/* Rest screen whose duration is set at run time so that the whole distractor
-   window lasts exactly `totalMs`, with a floor of `minMs`. */
-function makeElasticRestScreen ({ totalMs, minMs, title, body, dataPhase }) {
-    let planned = minMs;
-    return {
-        type: jsPsychHtmlKeyboardResponse,
-        stimulus: `<div class="text-screen timed-screen">
-                    <h2>${title}</h2>
-                    ${body}
-                    <div class="countdown" id="cdown">--:--</div>
-                   </div>`,
-        choices: 'NO_KEYS',
-        trial_duration: function () {
-            const elapsed = performance.now() - (ROCONN._distractorStart || performance.now());
-            planned = Math.max(minMs, totalMs - elapsed);
-            return planned;
-        },
-        data: { phase: dataPhase },
-        on_load: function () {
-            const start = performance.now();
-            const dur = planned;
-            const tick = () => {
-                const remaining = Math.max(0, dur - (performance.now() - start));
-                const m = Math.floor(remaining / 60000);
-                const sec = Math.floor((remaining % 60000) / 1000);
-                const el = document.getElementById('cdown');
-                if (el) el.textContent = `${m}:${sec.toString().padStart(2, '0')}`;
-                if (remaining > 0) requestAnimationFrame(tick);
-            };
-            tick();
-        },
-        on_finish: function (data) {
-            data.rest_ms = planned;
-            data.distractor_total_ms =
-                performance.now() - (ROCONN._distractorStart || performance.now());
-        },
-    };
-}
 
 /* Helper — a screen that auto-advances after `durationMs` and optionally
    shows a countdown. */

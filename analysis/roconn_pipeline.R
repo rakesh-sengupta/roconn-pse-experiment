@@ -1,156 +1,331 @@
 # =============================================================================
-#  roconn_pipeline.R  —  ROCONN Asymmetric PSE Shift, v5 analysis pipeline
+#  roconn_pipeline.R  --  ROCONN Asymmetric Drift Study
+#  Frozen analysis script accompanying the Stage 1 Registered Report.
+#  Version 6.1, September 2026.
 #
-#  Adapted from Protocol v5 Appendix C to consume the jsPsych CSV output of
-#  this repository (one trial-data file per participant in ./data/).
+#  Input : ./data/roconn_<pid>_<cell>_<sg>.csv        (trial-level, one/session)
+#          ./data/roconn_condition_<pid>_<cell>_<sg>.csv  (manifest, ignored here)
+#          ./data/suspicion_exclusions.csv  (optional: pid column, coder output)
+#  Output: ./output/*.csv and a printed log
 #
-#  Statistical choices (logistic fit; gamma = 0.5; lambda fixed; aggregated
-#  input; LMM with topology*pressure as the primary test) follow Appendix C
-#  verbatim. Only the data-loading/aggregation step is changed to match the
-#  jsPsych column names.
-#
-#  Requires: lme4, lmerTest, quickpsy, tidyverse, emmeans, MuMIn
-#            (lavaan + jsonlite only for the optional mediation block)
+#  Required packages : tidyverse, lme4, lmerTest, emmeans
+#  Optional packages : MuMIn (R^2), lavaan + jsonlite (mediation),
+#                      quickpsy (cross-check of the psychometric fit)
+#  The psychometric fit itself is done in base R so that the confirmatory and
+#  secondary analyses do not depend on any package outside the four required
+#  ones.
 # =============================================================================
 
-library(quickpsy); library(lme4); library(lmerTest)
-library(tidyverse); library(emmeans); library(MuMIn)
+suppressPackageStartupMessages({
+  library(tidyverse); library(lme4); library(lmerTest); library(emmeans)
+})
+set.seed(20260911)
+dir.create("output", showWarnings = FALSE)
 
-# ---- 0. Load every trial-data file in ./data/ -------------------------------
-#   jsPsych writes two files per session:
-#     roconn_<pid>_<cell>_<sg>.csv            <- trial-level data (USE THESE)
-#     roconn_condition_<pid>_<cell>_<sg>.csv  <- one-row condition manifest
-#   We load only the trial-level files (exclude the "condition" manifests).
+EXPECTED_BISECTION_ROWS <- 195   # 3 blocks x 65 trials
+MISSING_TRIAL_LIMIT     <- 0.20
+CRITICAL_PROBES         <- c(3, 5)
+CONTROL_PROBES          <- c(2, 4, 6)
+
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+# Sessions that ended early carry fewer columns than completed ones. Add any
+# that are missing so that every downstream reference is safe.
+ensure_cols <- function(d, defaults) {
+  for (nm in names(defaults)) if (!nm %in% names(d)) d[[nm]] <- defaults[[nm]]
+  d
+}
+
+# ---- 0. Load -----------------------------------------------------------------
 files <- list.files("data", pattern = "^roconn_.*\\.csv$", full.names = TRUE)
 files <- files[!grepl("roconn_condition_", files)]
 stopifnot(length(files) > 0)
 
-dat <- files |>
-  map(read_csv, show_col_types = FALSE) |>
+raw <- files |>
+  map(\(f) read_csv(f, show_col_types = FALSE, progress = FALSE) |>
+             mutate(across(everything(), as.character))) |>
   list_rbind()
 
-# ---- 1. Keep bisection trials; recode response ------------------------------
-#   response_num: 1 = "j"/closer-to-End, 0 = "f"/closer-to-Start,
-#                 NA = no response within 4 s (dropped — NOT counted as 0).
-#   block_num is the protocol's block_order (1 = first block run, etc.).
-bis <- dat |>
-  filter(phase == "bisection") |>
-  filter(!is.na(response_num)) |>
+num <- function(x) suppressWarnings(as.numeric(x))
+
+raw <- ensure_cols(raw, list(
+  assignment = NA_character_, demo = "0", withdraw = "false",
+  termination_reason = NA_character_, response_num = NA_character_,
+  probe_pos = NA_character_, pressure = NA_character_,
+  block_order = NA_character_, post_distractor_accuracy = NA_character_,
+  topology = NA_character_, direction = NA_character_, cell = NA_character_))
+
+# ---- 1. Session-level screening ---------------------------------------------
+# Sessions that never reach the bisection blocks (consent refused, screened out,
+# reading-gate failure) write no usable trial data; they are counted, not
+# analysed. Withdrawn sessions write no trial file at all, but the check is
+# kept so that a stray file cannot slip through.
+flags <- raw |>
+  group_by(pid) |>
+  summarise(
+    n_bisection = sum(phase == "bisection", na.rm = TRUE),
+    assignment  = { a <- na.omit(assignment); if (length(a)) a[1] else NA_character_ },
+    demo_flag   = suppressWarnings(max(num(demo), na.rm = TRUE)),
+    withdrew    = any(tolower(withdraw) == "true", na.rm = TRUE),
+    terminated  = any(!is.na(termination_reason) & nzchar(termination_reason)),
+    .groups = "drop"
+  ) |>
+  mutate(demo_flag = ifelse(is.finite(demo_flag), demo_flag, 0))
+
+# Debrief item 3: "Did you believe the other reviewers were real participants?"
+susp_q3 <- raw |>
+  filter(phase == "fd_q3") |>
+  mutate(said_no = str_detect(response, regex('"fd_q3"\\s*:\\s*"No"', ignore_case = TRUE))) |>
+  group_by(pid) |> summarise(fd_q3_no = any(said_no, na.rm = TRUE), .groups = "drop")
+
+# Open-ended items 1 and 2 are coded offline by two raters blind to condition.
+susp_open <- if (file.exists("data/suspicion_exclusions.csv")) {
+  read_csv("data/suspicion_exclusions.csv", show_col_types = FALSE) |>
+    transmute(pid = as.character(pid), coded_suspicious = TRUE)
+} else tibble(pid = character(), coded_suspicious = logical())
+
+flags <- flags |>
+  left_join(susp_q3,   by = "pid") |>
+  left_join(susp_open, by = "pid") |>
+  mutate(
+    fd_q3_no         = coalesce(fd_q3_no, FALSE),
+    coded_suspicious = coalesce(coded_suspicious, FALSE),
+    excl_incomplete  = n_bisection == 0 | terminated,
+    excl_demo        = demo_flag == 1 | (n_bisection > 0 &
+                                         n_bisection != EXPECTED_BISECTION_ROWS),
+    excl_assignment  = !is.na(assignment) & assignment != "url",
+    excl_withdrew    = withdrew,
+    excl_suspicion   = fd_q3_no | coded_suspicious
+  )
+
+cat("\n=== Session screening ===\n")
+print(flags |> summarise(sessions = n(), across(starts_with("excl_"), sum)))
+
+keep_sessions <- flags |>
+  filter(!excl_incomplete, !excl_demo, !excl_assignment,
+         !excl_withdrew, !excl_suspicion) |>
+  pull(pid)
+
+# ---- 2. Bisection trials and the missing-trial rule --------------------------
+bis_all <- raw |> filter(phase == "bisection", pid %in% keep_sessions)
+
+missing <- bis_all |>
+  group_by(pid) |>
+  summarise(prop_missing = mean(is.na(num(response_num))), .groups = "drop")
+
+cat("\n=== Missing-trial exclusion (>", MISSING_TRIAL_LIMIT * 100, "%) ===\n", sep = "")
+print(missing |> filter(prop_missing > MISSING_TRIAL_LIMIT))
+
+keep_ids <- missing |> filter(prop_missing <= MISSING_TRIAL_LIMIT) |> pull(pid)
+
+bis <- bis_all |>
+  filter(pid %in% keep_ids, !is.na(num(response_num))) |>
   transmute(
     participant = pid,
     cell        = cell,
     topology    = factor(topology,  levels = c("low", "high")),
     direction   = factor(direction, levels = c("seq1to2", "seq2to1")),
-    block_num   = as.numeric(block_order),
-    block_order = as.numeric(block_order),
-    pressure    = as.numeric(pressure),
-    probe_pos   = as.numeric(probe_pos),
-    post_distractor_accuracy = as.numeric(post_distractor_accuracy),
-    response_num = as.numeric(response_num)
+    block_order = num(block_order),
+    pressure    = num(pressure) / 100,            # 0, 0.5, 1
+    probe_pos   = num(probe_pos),
+    pda         = num(post_distractor_accuracy),
+    end_resp    = num(response_num)               # 1 = "closer to End"
   )
 
-# ---- 2. AGGREGATE: one row per participant x block x probe position ---------
-#   quickpsy requires aggregated data, NOT raw trial-level data.
-dat_agg <- bis |>
-  group_by(participant, cell, topology, direction,
-           block_num, pressure, block_order,
-           post_distractor_accuracy, probe_pos) |>
-  summarise(k_resp = sum(response_num),   # number of "j"/End responses
-            n_resp = n(),                 # total scored trials at this position
-            .groups = "drop")
+stopifnot(nrow(bis) > 0)
 
-# ---- 3. Fit psychometric function per participant x block -------------------
-#   gamma = 0.5 (fixed, forced choice); lambda fixed; PSE and k estimated.
-fit_one_block <- function(d) {
-  tryCatch({
-    fit <- quickpsy(d = d,
-                    x = probe_pos,
-                    k = k_resp,
-                    n = n_resp,
-                    fun = logistic_fun,    # logistic, NOT cum_normal
-                    guess = 0.5,           # gamma fixed
-                    lapses = FALSE,        # lambda handled per Appendix C note
-                    parini = list(c(2, 6),    # PSE: search between 2 and 6
-                                  c(0.1, 10))) # k: positive only
-    tibble(PSE = fit$par$par[1], k_slope = fit$par$par[2])
-  }, error = function(e) tibble(PSE = NA_real_, k_slope = NA_real_))
-}
+# ---- 3. Primary DV: transposition drift index -------------------------------
+#   D = p3 - p5 on ENCODED probe positions.
+#   Veridical memory -> p3 low, p5 high -> D strongly negative.
+#   Drift toward the pushed ordering -> D rises. D increases with drift in
+#   every cell, so no sign flip by Direction is needed.
+props <- bis |>
+  group_by(participant, cell, topology, direction, block_order, pressure, pda,
+           probe_pos) |>
+  summarise(p_end = mean(end_resp), n_trials = n(), .groups = "drop")
 
-pse_list <- dat_agg |>
-  group_by(participant, cell, topology, direction,
-           block_num, pressure, block_order,
-           post_distractor_accuracy) |>
-  group_modify(~ fit_one_block(.x)) |>
+drift <- props |>
+  filter(probe_pos %in% CRITICAL_PROBES) |>
+  select(-n_trials) |>
+  pivot_wider(names_from = probe_pos, values_from = p_end, names_prefix = "p") |>
+  mutate(D = p3 - p5) |>
+  group_by(participant) |>
+  mutate(D_baseline = first(D[pressure == 0]),
+         delta_D    = D - D_baseline) |>
   ungroup()
 
-# ---- 4. Exclude participants with any invalid block (k <= 0) ----------------
-pse_list <- pse_list |>
-  mutate(valid = !is.na(k_slope) & k_slope > 0)
+cat("\n=== Drift index by topology and pressure ===\n")
+print(drift |> group_by(topology, pressure) |>
+        summarise(mean_D = mean(D), mean_delta_D = mean(delta_D),
+                  sd_D = sd(D), n = n(), .groups = "drop"))
+write_csv(drift, "output/drift_index.csv")
 
-keep_ids <- pse_list |>
-  group_by(participant) |>
-  summarise(n_valid = sum(valid), .groups = "drop") |>
-  filter(n_valid == 3) |>
-  pull(participant)
-
-pse_clean <- pse_list |>
-  filter(participant %in% keep_ids, valid)
-
-# ---- 5. Compute DeltaPSE (within-participant 0% baseline) -------------------
-pse_delta <- pse_clean |>
-  group_by(participant) |>
-  mutate(baseline_PSE = PSE[pressure == 0],
-         delta_PSE    = PSE - baseline_PSE) |>
-  ungroup()
-
-# ---- 6. Primary linear mixed-effects model ----------------------------------
+# ---- 4. Confirmatory model ---------------------------------------------------
+#   H1 is the Topology x Pressure coefficient. D is modelled directly: the
+#   random intercept absorbs each participant's own baseline, which the change
+#   score cannot do without making the model singular (delta_D is exactly 0 at
+#   pressure 0 for every participant by construction).
 mod_full <- lmer(
-  delta_PSE ~ topology * pressure +
-              direction * pressure +
-              topology * direction +
-              block_order +
-              post_distractor_accuracy +
-              (1 + pressure | participant),
-  data    = pse_delta,
-  REML    = FALSE,
-  control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
-)
+  D ~ topology * pressure + direction * pressure + topology * direction +
+      block_order + pda + (1 + pressure | participant),
+  data = drift, REML = FALSE,
+  control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
 
-# Likelihood-ratio tests for the key interactions
-mod_noB4 <- update(mod_full, . ~ . - topology:pressure)
-cat("\n=== Primary test: Topology x Pressure (beta_4) ===\n")
-print(anova(mod_noB4, mod_full))
+lrt <- function(term, label) {
+  reduced <- update(mod_full, as.formula(paste(". ~ . -", term)))
+  cat("\n=== ", label, " ===\n", sep = "")
+  print(anova(reduced, mod_full))
+}
+lrt("topology:pressure",  "H1 (primary): Topology x Pressure")
+lrt("direction:pressure", "H2 (null prediction): Direction x Pressure")
+lrt("topology:direction", "H3 (null prediction): Topology x Direction")
 
-mod_noB5 <- update(mod_full, . ~ . - direction:pressure)
-cat("\n=== Null prediction: Direction x Pressure (beta_5) ===\n")
-print(anova(mod_noB5, mod_full))
+cat("\n=== Full model ===\n")
+print(summary(mod_full)$coefficients)
+if (requireNamespace("MuMIn", quietly = TRUE)) print(MuMIn::r.squaredGLMM(mod_full))
 
-cat("\n=== Full model summary ===\n")
-print(summary(mod_full))
-print(r.squaredGLMM(mod_full))     # marginal & conditional R^2
-
-# ---- 7. Planned comparisons: High-C vs Low-C at each pressure ---------------
-emm <- emmeans(mod_full, ~ topology | pressure)
-cat("\n=== Planned comparisons (Bonferroni, alpha_corr = .017) ===\n")
+emm <- emmeans(mod_full, ~ topology | pressure, at = list(pressure = c(0, 0.5, 1)))
+cat("\n=== Planned comparisons (Bonferroni, alpha = .017) ===\n")
 print(pairs(emm, adjust = "bonferroni"))
 
-# ---- 8. OPTIONAL: mediation by perceived connectedness ----------------------
-#   jsPsych's survey-likert stores its answers as a JSON object in the
-#   `response` column of the mc_connectedness row. Extract mc_connected and
-#   mc_known, average them, merge into pse_delta, then fit the SEM.
-#
-# library(lavaan); library(jsonlite)
-# conn <- dat |>
-#   filter(phase == "mc_connectedness") |>
-#   rowwise() |>
-#   mutate(r = list(fromJSON(response)),
-#          connectedness = mean(c(r$mc_connected, r$mc_known))) |>
-#   ungroup() |>
-#   transmute(participant = pid, connectedness)
-# pse_med <- pse_delta |> left_join(conn, by = "participant")
-# med_model <- '
-#   connectedness ~ topology
-#   delta_PSE     ~ connectedness + topology
-# '
-# fit_med <- sem(med_model, data = pse_med, se = "bootstrap", bootstrap = 5000)
-# summary(fit_med, fit.measures = TRUE, ci = TRUE)
+# ---- 5. Control probes -------------------------------------------------------
+#   Positions 2, 4 and 6 are identical in both orderings. Pressure should not
+#   move them; an effect here would indicate a general response bias.
+control <- props |>
+  filter(probe_pos %in% CONTROL_PROBES) |>
+  mutate(probe_pos = factor(probe_pos))
+
+mod_control <- lmer(
+  p_end ~ topology * pressure + probe_pos + block_order +
+          (1 + pressure | participant),
+  data = control, REML = FALSE,
+  control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+cat("\n=== Control probes: pressure should be null ===\n")
+print(summary(mod_control)$coefficients)
+
+# ---- 6. Secondary: psychometric fit (PSE and JND) ---------------------------
+#   P(end | x) = gamma + (1 - gamma - lambda) / (1 + exp(-k (x - PSE)))
+#   gamma = 0.5 (two-alternative forced choice), lambda = 0.02, both FIXED.
+#   Only PSE and k are estimated, by maximum likelihood over probe positions
+#   2-6. Base R only; quickpsy(guess = 0.5, lapses = 0.02) gives the same fit
+#   and is used as an optional cross-check.
+GAMMA <- 0.5; LAMBDA <- 0.02
+
+psy_curve <- function(x, pse, k) GAMMA + (1 - GAMMA - LAMBDA) / (1 + exp(-k * (x - pse)))
+
+fit_block <- function(d) {
+  nll <- function(par) {
+    p <- psy_curve(d$probe_pos, par[1], exp(par[2]))     # exp() keeps k > 0
+    p <- pmin(pmax(p, 1e-9), 1 - 1e-9)
+    -sum(d$k_end * log(p) + (d$n_trials - d$k_end) * log(1 - p))
+  }
+  best <- NULL
+  for (start in list(c(4, log(1)), c(3, log(0.5)), c(5, log(2)))) {
+    f <- tryCatch(optim(start, nll, method = "Nelder-Mead",
+                        control = list(maxit = 2000, reltol = 1e-10)),
+                  error = function(e) NULL)
+    if (!is.null(f) && f$convergence == 0 && (is.null(best) || f$value < best$value))
+      best <- f
+  }
+  if (is.null(best)) return(tibble(PSE = NA_real_, k_slope = NA_real_, converged = FALSE))
+  tibble(PSE = best$par[1], k_slope = exp(best$par[2]), converged = TRUE)
+}
+
+agg <- bis |>
+  group_by(participant, cell, topology, direction, block_order, pressure, pda,
+           probe_pos) |>
+  summarise(k_end = sum(end_resp), n_trials = n(), .groups = "drop")
+
+psy <- agg |>
+  group_by(participant, cell, topology, direction, block_order, pressure, pda) |>
+  group_modify(~ fit_block(.x)) |>
+  ungroup() |>
+  mutate(valid = converged & !is.na(k_slope) & k_slope > 0.01 &
+                 PSE > 1 & PSE < 7,
+         JND   = ifelse(valid, 1 / k_slope, NA_real_))
+
+cat("\n=== Psychometric fit success rate ===\n")
+print(psy |> group_by(topology, pressure) |>
+        summarise(prop_valid = mean(valid), n = n(), .groups = "drop"))
+write_csv(psy, "output/psychometric_fits.csv")
+
+# A block whose fit fails is dropped from THIS analysis only. The participant
+# stays in the primary analysis, which uses no curve fitting -- so the old
+# "any block with k <= 0 excludes the participant" rule, which would have
+# removed the participants who drifted most, no longer applies anywhere.
+if (sum(psy$valid) > 30) {
+  mod_pse <- lmer(PSE ~ topology * pressure + direction * pressure +
+                        block_order + pda + (1 + pressure | participant),
+                  data = filter(psy, valid), REML = FALSE,
+                  control = lmerControl(optimizer = "bobyqa"))
+  cat("\n=== Secondary: PSE ===\n"); print(summary(mod_pse)$coefficients)
+
+  mod_jnd <- lmer(JND ~ topology * pressure + direction * pressure +
+                        block_order + pda + (1 + pressure | participant),
+                  data = filter(psy, valid), REML = FALSE,
+                  control = lmerControl(optimizer = "bobyqa"))
+  cat("\n=== Secondary: JND = 1/k (attractor broadening) ===\n")
+  print(summary(mod_jnd)$coefficients)
+}
+
+# ---- 7. Manipulation checks --------------------------------------------------
+get_likert <- function(ph, fields) {
+  if (!requireNamespace("jsonlite", quietly = TRUE)) return(NULL)
+  d <- raw |> filter(phase == ph, pid %in% keep_ids)
+  if (!nrow(d)) return(NULL)
+  vals <- map(d$response, \(s) tryCatch(jsonlite::fromJSON(s), error = function(e) NULL))
+  tibble(participant = d$pid,
+         value = map_dbl(vals, \(v) if (is.null(v)) NA_real_ else
+                                    mean(unlist(v[fields]), na.rm = TRUE)))
+}
+
+conn <- get_likert("mc_connectedness", c("mc_connected", "mc_known"))
+if (!is.null(conn)) {
+  mc <- drift |> distinct(participant, topology) |> left_join(conn, by = "participant")
+  cat("\n=== Manipulation check: perceived connectedness ===\n")
+  print(mc |> group_by(topology) |>
+          summarise(mean = mean(value, na.rm = TRUE),
+                    sd = sd(value, na.rm = TRUE), n = n(), .groups = "drop"))
+  if (n_distinct(mc$topology) == 2) print(t.test(value ~ topology, data = mc))
+}
+
+endorse <- raw |>
+  filter(phase == "mc_endorsement", pid %in% keep_ids) |>
+  mutate(count = num(str_extract(response, "\\d+"))) |>
+  transmute(participant = pid, endorse_count = count)
+if (nrow(endorse)) {
+  ec <- drift |> distinct(participant, topology) |> left_join(endorse, by = "participant")
+  cat("\n=== Manipulation check: perceived endorsement count ===\n")
+  print(ec |> group_by(topology) |>
+          summarise(mean = mean(endorse_count, na.rm = TRUE), n = n(), .groups = "drop"))
+}
+
+# ---- 8. Mediation (secondary) -----------------------------------------------
+if (requireNamespace("lavaan", quietly = TRUE) && !is.null(conn)) {
+  med_dat <- drift |>
+    filter(pressure == 1) |>
+    left_join(conn, by = "participant") |>
+    transmute(delta_D, connectedness = value,
+              topology_n = as.numeric(topology == "high")) |>
+    drop_na()
+  if (nrow(med_dat) > 40) {
+    med_model <- '
+      connectedness ~ a*topology_n
+      delta_D       ~ b*connectedness + c*topology_n
+      indirect := a*b
+      total    := c + a*b '
+    fit_med <- lavaan::sem(med_model, data = med_dat,
+                           se = "bootstrap", bootstrap = 5000)
+    cat("\n=== Mediation by perceived connectedness ===\n")
+    print(lavaan::summary(fit_med, ci = TRUE))
+  }
+}
+
+# ---- 9. Reported flow --------------------------------------------------------
+cat("\n=== Participant flow ===\n")
+cat("Session files loaded      :", length(files), "\n")
+cat("Passed session screening  :", length(keep_sessions), "\n")
+cat("Passed missing-trial rule :", length(keep_ids), "\n")
+cat("Blocks in primary model   :", nrow(drift), "\n")
+write_csv(flags, "output/screening_flags.csv")
+cat("\nWritten to output/: drift_index.csv, psychometric_fits.csv, screening_flags.csv\n")
