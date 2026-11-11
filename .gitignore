@@ -1,0 +1,11 @@
+# collected data and outputs never go into the repository
+data/
+output/
+randomisation_list.csv
+# test artefacts
+tests/node_modules/
+tests/package-lock.json
+tests/pipeline_test/
+# R / Python
+.Rhistory
+__pycache__/

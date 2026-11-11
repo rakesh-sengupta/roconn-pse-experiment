@@ -1,0 +1,14 @@
+{
+  "name": "roconn-experiment-tests",
+  "version": "7.0.0",
+  "private": true,
+  "description": "Headless tests for the ROCONN experiment (jsdom + the jsPsych copy in ../vendor)",
+  "type": "module",
+  "scripts": {
+    "test": "node t6.mjs && node t7.mjs && node t5.mjs && node t4.mjs && node t9.mjs",
+    "templates": "node make_templates.mjs"
+  },
+  "dependencies": {
+    "jsdom": "^30.0.1"
+  }
+}

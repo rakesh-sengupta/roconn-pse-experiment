@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Review Study</title>
+
+    <!-- jsPsych 7.3.4 core + plugins, bundled locally (vendor/) so that the
+         experiment runs on laboratory machines without a network connection. -->
+    <script src="vendor/jspsych-7.3.4/jspsych.js"></script>
+    <script src="vendor/jspsych-7.3.4/plugins/plugin-html-keyboard-response.js"></script>
+    <script src="vendor/jspsych-7.3.4/plugins/plugin-html-button-response.js"></script>
+    <script src="vendor/jspsych-7.3.4/plugins/plugin-survey-text.js"></script>
+    <script src="vendor/jspsych-7.3.4/plugins/plugin-survey-likert.js"></script>
+    <script src="vendor/jspsych-7.3.4/plugins/plugin-survey-multi-choice.js"></script>
+    <script src="vendor/jspsych-7.3.4/plugins/plugin-preload.js"></script>
+    <script src="vendor/jspsych-7.3.4/plugins/plugin-call-function.js"></script>
+    <script src="vendor/jspsych-7.3.4/plugins/plugin-fullscreen.js"></script>
+
+    <link rel="stylesheet" href="vendor/jspsych-7.3.4/jspsych.css">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- Project sources (load order matters) -->
+    <script src="js/config.js"></script>
+    <script src="js/panels.js"></script>
+    <script src="js/tasks.js"></script>
+    <script src="js/phases.js"></script>
+    <script src="js/experiment.js"></script>
+</body>
+</html>

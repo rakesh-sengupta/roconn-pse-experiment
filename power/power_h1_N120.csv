@@ -1,0 +1,3 @@
+"delta","reps","shape","N","power_H1","equiv_E1","nsim"
+0.15,13,"linear",120,0.8,0.96,200
+0.15,13,"saturating",120,0.715,0.91,200
